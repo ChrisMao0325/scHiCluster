@@ -9,7 +9,6 @@ from .__main__ import setup_logging
 log = logging.getLogger()
 
 os.environ["NUMEXPR_MAX_THREADS"] = "8"
-
 DESCRIPTION = """
 hic-internal is used for automation, not intend to be used by end user. 
 Use hicluster instead. 
@@ -470,6 +469,32 @@ def call_loop_internal_subparser(subparser):
         "--size_thres",
         type=float,
         default=1
+    )
+    parser_req.add_argument(
+        "--use_bkfilter",
+        dest="use_bkfilter",
+        action="store_true",
+        default=True,
+        help="Apply E-based background filter (bkfilter)."
+    )
+    parser_req.add_argument(
+        "--no_bkfilter",
+        dest="use_bkfilter",
+        action="store_false",
+        help="Disable E-based background filter (bkfilter)."
+    )
+    parser_req.add_argument(
+        "--e_positive_only",
+        dest="e_positive_only",
+        action="store_true",
+        default=True,
+        help="Only consider loop candidates with E > 0."
+    )
+    parser_req.add_argument(
+        "--no_e_positive_only",
+        dest="e_positive_only",
+        action="store_false",
+        help="Allow loop candidates with E <= 0."
     )
 
 

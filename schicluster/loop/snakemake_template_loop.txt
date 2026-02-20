@@ -31,4 +31,6 @@ rule call_loop:
             fdr_max_dist=500,
             fdr_thres=0.1,
             dist_thres=20000,
-            size_thres=1)
+            size_thres=1,
+            e_positive_only=e_positive_only,
+            use_bkfilter=use_bkfilter)

@@ -63,7 +63,9 @@ def prepare_loop_snakemake(cell_table_path,
                            log_e=True,
                            shuffle=False,
                            raw_resolution_str=None,
-                           downsample_shuffle=None):
+                           downsample_shuffle=None,
+                           e_positive_only=True,
+                           use_bkfilter=True):
     _cell_table_path = str(cell_table_path)
     sep = '\t' if _cell_table_path.endswith('tsv') else ','
     cell_table = pd.read_csv(cell_table_path, index_col=0, sep=sep, header=None,
@@ -142,7 +144,9 @@ def prepare_loop_snakemake(cell_table_path,
         output_dir=f'"{output_dir}"',
         chrom_size_path=f'"{chrom_size_path}"',
         resolution=resolution,
-        shuffle=shuffle
+        shuffle=shuffle,
+        e_positive_only=e_positive_only,
+        use_bkfilter=use_bkfilter
     )
     parameters_str = '\n'.join(f'{k} = {v}'
                                for k, v in scool_parameters.items())
@@ -204,6 +208,8 @@ def call_loop(cell_table_path,
               fdr_thres=0.1,
               dist_thres=20000,
               size_thres=1,
+              e_positive_only=True,
+              use_bkfilter=True,
               cleanup=True):
     if shuffle and (black_list_path is None):
         raise ValueError('Please provide black_list_path when shuffle=True')
@@ -287,7 +293,8 @@ def call_loop(cell_table_path,
                          fdr_thres=fdr_thres,
                          resolution=resolution,
                          dist_thres=dist_thres,
-                         size_thres=size_thres)
+                         size_thres=size_thres,
+                         use_bkfilter=use_bkfilter)
 
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
@@ -320,6 +327,7 @@ def merge_loop(group,
                fdr_thres=0.1,
                dist_thres=20000,
                size_thres=1,
+               e_positive_only=True,
                cleanup=True):
 
     group_list = pd.read_csv(f'{output_dir}/group_list.txt', header=None, index_col=None)[0].values
@@ -395,7 +403,8 @@ def merge_loop(group,
                      fdr_thres=fdr_thres,
                      resolution=resolution,
                      dist_thres=dist_thres,
-                     size_thres=size_thres)
+                     size_thres=size_thres,
+                     use_bkfilter=use_bkfilter)
 
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
@@ -403,4 +412,3 @@ def merge_loop(group,
 
     with open(f'{output_dir}/Success', 'w') as f:
         f.write('42')
-

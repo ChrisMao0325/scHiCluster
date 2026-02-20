@@ -3,6 +3,8 @@ import pandas as pd
 import pathlib
 output_dir = pathlib.Path(output_dir).absolute()
 groups = set([p.name.split('_chunk')[0] for p in output_dir.glob('*_chunk*')])
+e_positive_flag = '' if e_positive_only else ' --no_e_positive_only'
+bkfilter_flag = '' if use_bkfilter else ' --no_bkfilter'
 
 
 # check if all the chunks completed
@@ -119,6 +121,8 @@ if not shuffle:
             '--fdr_thres 0.1 '
             '--dist_thres 20000 '
             '--size_thres 1'
+            '{e_positive_flag}'
+            '{bkfilter_flag}'
 
 
 # merge group chunk dirs into a single scool

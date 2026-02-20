@@ -12,10 +12,15 @@ def fetch_chrom(cool, chrom) -> np.array:
     return cool.matrix(balance=False, sparse=True).fetch(chrom).toarray()
 
 
-def select_loop_candidates(cool_e, min_dist, max_dist, resolution, chrom):
+def select_loop_candidates(cool_e, min_dist, max_dist, resolution, chrom,
+                           e_positive_only=True):
     """Select loop candidate pixel to perform t test"""
     E = fetch_chrom(cool_e, chrom)
-    loop = np.where(E > 0)  # loop is [xs, ys] of E
+    if e_positive_only:
+        loop = np.where(E > 0)  # loop is [xs, ys] of E
+    else:
+        # Allow zero/negative E values; still exclude NaNs/Infs.
+        loop = np.where(np.isfinite(E))
 
     # only calculate upper triangle and remove the pixels close to diagonal
     dist_filter = np.logical_and((loop[1] - loop[0]) > (min_dist / resolution),
@@ -81,7 +86,8 @@ def call_loop_single_chrom(group_prefix,
                            min_dist=50000,
                            max_dist=10000000,
                            pad=5,
-                           gap=2):
+                           gap=2,
+                           e_positive_only=True):
     """calculate t test and loop background for one chromosome"""
     # matrix cool obj
     cool_e = cooler.Cooler(f'{group_prefix}.E.cool')
@@ -96,7 +102,8 @@ def call_loop_single_chrom(group_prefix,
                                      min_dist=min_dist,
                                      max_dist=max_dist,
                                      resolution=resolution,
-                                     chrom=chrom)
+                                     chrom=chrom,
+                                     e_positive_only=e_positive_only)
 
     print(f'{chrom}\tDoing paired T test with the local background.')
     local_p_value, loop_t, local_d = paired_t_test(cool_t=cool_t,
@@ -214,7 +221,9 @@ def call_loops(group_prefix,
                thres_v=1.2,
                fdr_thres=0.1,
                dist_thres=20000,
-               size_thres=1):
+               size_thres=1,
+               e_positive_only=True,
+               use_bkfilter=True):
     try:
         group_q = f'{group_prefix}.Q.cool'
         chroms = cooler.Cooler(group_q).chromnames
@@ -230,18 +239,31 @@ def call_loops(group_prefix,
                                       min_dist=50000,
                                       max_dist=10000000,
                                       pad=5,
-                                      gap=2)
+                                      gap=2,
+                                      e_positive_only=e_positive_only)
         total_loops.append(data)
     total_loops = pd.concat(total_loops).reset_index(drop=True)
 
     # add background judge info
-    print('Filtering loop by background.')
-    total_loops = filter_by_background(data=total_loops,
-                                       thres_bl=thres_bl,
-                                       thres_donut=thres_donut,
-                                       thres_h=thres_h,
-                                       thres_v=thres_v,
-                                       resolution=resolution)
+    if use_bkfilter:
+        print('Filtering loop by background.')
+        total_loops = filter_by_background(data=total_loops,
+                                           thres_bl=thres_bl,
+                                           thres_donut=thres_donut,
+                                           thres_h=thres_h,
+                                           thres_v=thres_v,
+                                           resolution=resolution)
+    else:
+        total_loops['bkfilter'] = True
+
+    # Ensure genomic coordinates exist even when bkfilter is skipped.
+    if total_loops.shape[0] > 0 and 'x1' not in total_loops.columns:
+        total_loops['x1'] = total_loops['x'].astype(int) * resolution
+        total_loops['y1'] = total_loops['y'].astype(int) * resolution
+        total_loops['x2'] = total_loops['x1'] + resolution
+        total_loops['y2'] = total_loops['y1'] + resolution
+        del total_loops['x']
+        del total_loops['y']
 
     # Group the loops by distance then calculate FDR separately
     print('Filtering loop by FDR.')
@@ -275,7 +297,8 @@ def call_loops(group_prefix,
                  fdr_thres=fdr_thres,
                  resolution=resolution,
                  dist_thres=dist_thres,
-                 size_thres=size_thres)
+                 size_thres=size_thres,
+                 use_bkfilter=use_bkfilter)
     return
 
 
@@ -284,10 +307,15 @@ def filter_loops(total_loops,
                  fdr_thres,
                  resolution,
                  dist_thres,
-                 size_thres):
-    loop = total_loops.loc[total_loops['bkfilter']
-                           & (total_loops['local_qval'] < fdr_thres)
-                           & (total_loops['global_qval'] < fdr_thres)].copy()
+                 size_thres,
+                 use_bkfilter=True):
+    if use_bkfilter:
+        loop = total_loops.loc[total_loops['bkfilter']
+                               & (total_loops['local_qval'] < fdr_thres)
+                               & (total_loops['global_qval'] < fdr_thres)].copy()
+    else:
+        loop = total_loops.loc[(total_loops['local_qval'] < fdr_thres)
+                               & (total_loops['global_qval'] < fdr_thres)].copy()
     loop.to_hdf(f'{output_prefix}.loop_info.hdf', key='data')
 
     # filter and save bedpe
@@ -323,4 +351,3 @@ def filter_loops(total_loops,
         with open(f'{output_prefix}.loop_summit.bedpe', 'w') as f:
             f.write(pd.DataFrame([]).to_csv())
     return
-

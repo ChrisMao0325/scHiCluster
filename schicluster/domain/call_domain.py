@@ -82,6 +82,16 @@ def call_domain_and_insulation(cell_url,
         x = matrix.data
         result = r.RunTopDom(j, p, x, bins, window_size)
         result = pd.DataFrame(result)
+        if result.shape[0] == 0 or result.shape[1] == 0:
+            return pd.DataFrame([], columns=['chrom', 'chromStart', 'chromEnd', 'name'])
+        # Normalize to a 4-column BED-like dataframe regardless of R/pandas orientation.
+        if result.shape[1] != 4 and result.shape[0] == 4:
+            result = result.T
+        if result.shape[1] >= 4:
+            result = result.iloc[:, :4]
+        else:
+            return pd.DataFrame([], columns=['chrom', 'chromStart', 'chromEnd', 'name'])
+        result.columns = ['chrom', 'chromStart', 'chromEnd', 'name']
         return result
 
     cool = cooler.Cooler(cell_url)
@@ -96,9 +106,10 @@ def call_domain_and_insulation(cell_url,
             pass
         else:
             try:
-                tmp = run_top_dom(matrix, bins).T
-                tmp[0] = chrom
-                total_domain_results.append(tmp)
+                tmp = run_top_dom(matrix, bins)
+                if tmp.shape[0] > 0:
+                    tmp['chrom'] = chrom
+                    total_domain_results.append(tmp)
             except RRuntimeError:
                 print('Got R error at', cell_url, chrom, matrix.shape, matrix.data.size, bins.shape)
         total_insulation_score.append(
