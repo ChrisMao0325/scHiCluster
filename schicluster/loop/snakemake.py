@@ -136,7 +136,7 @@ def prepare_loop_snakemake(cell_table_path,
     with open(output_dir / 'snakemake_cmd_step1.txt', 'w') as f:
         f.write(merge_raw_cmd + '\n')
         for chunk_dir in total_chunk_dirs:
-            cmd = f'snakemake -d {chunk_dir} --snakefile {chunk_dir}/Snakefile -j {cpu_per_job} --scheduler greedy'
+            cmd = f'snakemake -d {chunk_dir} --snakefile {chunk_dir}/Snakefile -j {cpu_per_job} --scheduler greedy --rerun-incomplete'
             f.write(cmd + '\n')
 
     # prepare the second step that merge cell chunks into groups
@@ -153,7 +153,7 @@ def prepare_loop_snakemake(cell_table_path,
     with open(output_dir / 'Snakefile', 'w') as f:
         f.write(parameters_str + GENERATE_MATRIX_SCOOL_TEMPLATE)
     with open(output_dir / 'snakemake_cmd_step2.txt', 'w') as f:
-        cmd = f'snakemake -d {output_dir} --snakefile {output_dir}/Snakefile -j {cpu_per_job} --scheduler greedy'
+        cmd = f'snakemake -d {output_dir} --snakefile {output_dir}/Snakefile -j {cpu_per_job} --scheduler greedy --rerun-incomplete'
         f.write(cmd + '\n')
     return
 
@@ -177,8 +177,31 @@ def check_chunk_dir_finish(output_dir):
     return
 
 
+def _unlock_snakemake(output_dir):
+    """Unlock all snakemake working directories to allow restart after preemption."""
+    output_dir = pathlib.Path(output_dir).absolute()
+    # Unlock chunk dirs (step1)
+    for chunk_dir in output_dir.glob('*_chunk*'):
+        snakefile = chunk_dir / 'Snakefile'
+        if snakefile.exists():
+            subprocess.run(
+                f'snakemake -d {chunk_dir} --snakefile {snakefile} --unlock',
+                shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # Unlock merge dir (step2)
+    snakefile = output_dir / 'Snakefile'
+    if snakefile.exists():
+        subprocess.run(
+            f'snakemake -d {output_dir} --snakefile {snakefile} --unlock',
+            shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    # Remove stale chunk_finished flag so check_chunk_dir_finish re-validates
+    flag = output_dir / 'chunk_finished'
+    if flag.exists():
+        flag.unlink()
+
+
 def _run_snakemake(output_dir):
     output_dir = pathlib.Path(output_dir).absolute()
+    _unlock_snakemake(output_dir)
     step1 = f'{output_dir}/snakemake_cmd_step1.txt'
     step2 = f'{output_dir}/snakemake_cmd_step2.txt'
     subprocess.run(['sh', step1], check=True)
@@ -210,6 +233,7 @@ def call_loop(cell_table_path,
               size_thres=1,
               e_positive_only=True,
               use_bkfilter=True,
+              cleanup_totalloop_info=True,
               cleanup=True):
     if shuffle and (black_list_path is None):
         raise ValueError('Please provide black_list_path when shuffle=True')
@@ -299,6 +323,15 @@ def call_loop(cell_table_path,
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
         subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
+    if cleanup_totalloop_info:
+        for group in groups:
+            real_total = f'{output_dir}/{group}/{group}.totalloop_info.hdf'
+            if os.path.exists(real_total):
+                os.remove(real_total)
+            if shuffle:
+                shuffle_total = f'{output_dir}/shuffle/{group}/{group}.totalloop_info.hdf'
+                if os.path.exists(shuffle_total):
+                    os.remove(shuffle_total)
 
     with open(f'{output_dir}/Success', 'w') as f:
         f.write('42')
@@ -328,6 +361,7 @@ def merge_loop(group,
                dist_thres=20000,
                size_thres=1,
                e_positive_only=True,
+               cleanup_totalloop_info=True,
                cleanup=True):
 
     group_list = pd.read_csv(f'{output_dir}/group_list.txt', header=None, index_col=None)[0].values
@@ -409,6 +443,14 @@ def merge_loop(group,
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
         subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
+    if cleanup_totalloop_info:
+        real_total = f'{output_dir}/{group}/{group}.totalloop_info.hdf'
+        if os.path.exists(real_total):
+            os.remove(real_total)
+        if shuffle:
+            shuffle_total = f'{output_dir}/shuffle/{group}/{group}.totalloop_info.hdf'
+            if os.path.exists(shuffle_total):
+                os.remove(shuffle_total)
 
     with open(f'{output_dir}/Success', 'w') as f:
         f.write('42')
