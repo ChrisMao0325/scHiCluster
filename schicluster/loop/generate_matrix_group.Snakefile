@@ -107,6 +107,7 @@ if not shuffle:
             '{group}/{group}.loop_summit.bedpe',
         params:
             prefix='{group}/{group}'
+        shadow: "minimal"
         threads:
             1
         shell:

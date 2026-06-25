@@ -103,6 +103,7 @@ if keep_cell_matrix:
         params:
             cell_url=lambda wildcards: cell_id_to_url[wildcards.cell_id],
             output_prefix='{chrom}/{cell_id}'
+        shadow: "minimal"
         threads:
             1
         shell:
@@ -126,6 +127,7 @@ else:
         params:
             cell_url=lambda wildcards: cell_id_to_url[wildcards.cell_id],
             output_prefix='{chrom}/{cell_id}'
+        shadow: "minimal"
         threads:
             1
         shell:
