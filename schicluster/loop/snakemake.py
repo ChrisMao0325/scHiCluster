@@ -240,6 +240,12 @@ def call_loop(cell_table_path,
 
     pathlib.Path(output_dir).mkdir(exist_ok=True)
 
+    # Whole-pipeline idempotency: if a previous run already wrote Success,
+    # there is nothing to do. Without this guard, a requeue would re-enter
+    # the FDR step and crash on an already-cleaned-up totalloop_info.hdf.
+    if os.path.exists(f'{output_dir}/Success'):
+        return
+
     # deal with cell table path, if the path has two col, add one group cal internally
     _cell_table_path = str(cell_table_path)
     sep = '\t' if _cell_table_path.endswith('tsv') else ','
@@ -291,6 +297,14 @@ def call_loop(cell_table_path,
         for group in groups:
             real_group_prefix = f'{real_dir}/{group}/{group}'
             shuffle_group_prefix = f'{shuffle_dir}/{group}/{group}'
+
+            # Per-group idempotency: loop_summit.bedpe is the last file
+            # filter_loops writes for this group. If it exists, FDR is done
+            # and we must NOT re-run update_fdr_qval (its input
+            # totalloop_info.hdf may have been cleaned up by an earlier run
+            # that died before writing Success).
+            if os.path.exists(f'{real_group_prefix}.loop_summit.bedpe'):
+                continue
 
             tot = compute_t(real_group_prefix)
             _ = compute_t(shuffle_group_prefix, tot)
