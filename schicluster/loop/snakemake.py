@@ -298,12 +298,18 @@ def call_loop(cell_table_path,
             real_group_prefix = f'{real_dir}/{group}/{group}'
             shuffle_group_prefix = f'{shuffle_dir}/{group}/{group}'
 
-            # Per-group idempotency: loop_summit.bedpe is the last file
-            # filter_loops writes for this group. If it exists, FDR is done
-            # and we must NOT re-run update_fdr_qval (its input
-            # totalloop_info.hdf may have been cleaned up by an earlier run
-            # that died before writing Success).
-            if os.path.exists(f'{real_group_prefix}.loop_summit.bedpe'):
+            # Per-group idempotency: FDR + cleanup leaves loop_summit.bedpe
+            # in place and removes totalloop_info.hdf. That combination can
+            # only occur if the full sequence -- update_fdr_qval,
+            # filter_loops, cleanup_totalloop_info -- already ran for this
+            # group. Re-running update_fdr_qval here would crash with
+            # FileNotFoundError on the deleted hdf.
+            # Note: loop_summit.bedpe alone is not enough (it's also written
+            # by the initial call_loops() during snakemake step2, before
+            # FDR runs); the missing totalloop_info.hdf is what proves the
+            # post-FDR cleanup ran.
+            if (os.path.exists(f'{real_group_prefix}.loop_summit.bedpe')
+                    and not os.path.exists(f'{real_group_prefix}.totalloop_info.hdf')):
                 continue
 
             tot = compute_t(real_group_prefix)
