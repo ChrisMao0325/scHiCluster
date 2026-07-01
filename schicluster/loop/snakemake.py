@@ -357,6 +357,113 @@ def call_loop(cell_table_path,
         f.write('42')
     return
 
+
+def call_loop_pseudobulk(cell_table_path,
+                         output_dir,
+                         chrom_size_path,
+                         chunk_size=200,
+                         dist=5050000,
+                         cap=5,
+                         pad=5,
+                         gap=2,
+                         resolution=10000,
+                         min_cutoff=1e-6,
+                         keep_cell_matrix=False,
+                         cpu_per_job=10,
+                         log_e=True,
+                         raw_resolution_str=None,
+                         cleanup=True):
+    """Generate group-level pseudobulk .cool files only, without loop calling.
+
+    Runs step1 (per-cell loop matrices) and step2 (chunk->group merge) on the
+    real cell-group assignments, then stops. Produces
+      {output_dir}/{group}/{group}.{E,E2,T,T2,Q,Q2}.cool
+    per group. No .bedpe, no FDR, no shuffle dir.
+
+    Use this when you only need the pseudobulk matrices -- e.g. to feed a
+    differential-loop pipeline downstream, or to be re-merged into
+    coarser-level groups via merge_group_to_bigger_group_cools before any
+    loop calling.
+
+    Idempotent: if {output_dir}/Success exists, returns immediately.
+    """
+    pathlib.Path(output_dir).mkdir(exist_ok=True)
+    if os.path.exists(f'{output_dir}/Success'):
+        return
+
+    # Normalize cell_table (same handling as call_loop).
+    _cell_table_path = str(cell_table_path)
+    sep = '\t' if _cell_table_path.endswith('tsv') else ','
+    cell_table = pd.read_csv(cell_table_path, index_col=0, sep=sep, header=None)
+    cell_table.index.name = 'cell_id'
+    if cell_table.shape[1] == 1:
+        cell_table.columns = ['cell_url']
+        cell_table['cell_group'] = 'group'
+    elif cell_table.shape[1] == 2:
+        cell_table.columns = ['cell_url', 'cell_group']
+    else:
+        raise ValueError(f'Expect cell_table_path to be '
+                         f'two columns (cell_id, cell_url) or '
+                         f'three columns (cell_id, cell_url, cell_group), '
+                         f'got {cell_table.shape[1]} columns.')
+    cell_table_path = f'{output_dir}/cell_table.csv'
+    cell_table.to_csv(cell_table_path, header=False, index=True)
+    groups = list(cell_table['cell_group'].unique())
+
+    # Prepare step1+step2 with shuffle=False (real data). This writes
+    # snakemake_cmd_step1.txt, snakemake_cmd_step2.txt, and the top-level
+    # Snakefile whose `summary` rule normally requires .loop.bedpe.
+    if not os.path.exists(f'{output_dir}/finish'):
+        prepare_loop_snakemake(cell_table_path=cell_table_path,
+                               output_dir=output_dir,
+                               chrom_size_path=chrom_size_path,
+                               chunk_size=chunk_size,
+                               dist=dist,
+                               cap=cap,
+                               pad=pad,
+                               gap=gap,
+                               resolution=resolution,
+                               min_cutoff=min_cutoff,
+                               keep_cell_matrix=keep_cell_matrix,
+                               cpu_per_job=cpu_per_job,
+                               log_e=log_e,
+                               raw_resolution_str=raw_resolution_str,
+                               shuffle=False)
+
+        # Unlock in case of a prior interrupted run.
+        _unlock_snakemake(pathlib.Path(output_dir).absolute())
+
+        # Step1: per-cell per-chrom loop matrices, merged per chunk into cool.
+        subprocess.run(['sh', f'{output_dir}/snakemake_cmd_step1.txt'],
+                       check=True)
+
+        # Step2: merge chunks into group cools. Bypass the default `summary`
+        # target (which asks for .loop.bedpe and would trigger call_loop);
+        # target the group .cool files explicitly.
+        matrix_types = ['E', 'E2', 'T', 'T2', 'Q', 'Q2']
+        targets = [f'{g}/{g}.{mt}.cool' for g in groups for mt in matrix_types]
+        subprocess.run(['snakemake',
+                        '-d', str(pathlib.Path(output_dir).absolute()),
+                        '--snakefile', f'{output_dir}/Snakefile',
+                        '-j', str(cpu_per_job),
+                        '--scheduler', 'greedy',
+                        '--rerun-incomplete', '--'] + targets,
+                       check=True)
+
+        # Manually clean up chunk dirs (the `summary` rule's rm -rf never
+        # fired because we bypassed it), then touch `finish`.
+        for chunk_dir in pathlib.Path(output_dir).glob('*_chunk*'):
+            subprocess.run(f'rm -rf {chunk_dir}', shell=True, check=False)
+        pathlib.Path(f'{output_dir}/finish').touch()
+
+    if cleanup:
+        subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
+
+    with open(f'{output_dir}/Success', 'w') as f:
+        f.write('42')
+    return
+
+
 def merge_loop(group,
                output_dir,
                chrom_size_path,
