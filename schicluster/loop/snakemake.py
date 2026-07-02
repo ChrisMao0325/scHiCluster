@@ -361,6 +361,7 @@ def call_loop(cell_table_path,
 def call_loop_pseudobulk(cell_table_path,
                          output_dir,
                          chrom_size_path,
+                         shuffle=True,
                          chunk_size=200,
                          dist=5050000,
                          cap=5,
@@ -373,17 +374,25 @@ def call_loop_pseudobulk(cell_table_path,
                          log_e=True,
                          raw_resolution_str=None,
                          cleanup=True):
-    """Generate group-level pseudobulk .cool files only, without loop calling.
+    """Generate group-level pseudobulk .cool files, without loop calling.
 
     Runs step1 (per-cell loop matrices) and step2 (chunk->group merge) on the
-    real cell-group assignments, then stops. Produces
+    real cell-group assignments. Produces
       {output_dir}/{group}/{group}.{E,E2,T,T2,Q,Q2}.cool
-    per group. No .bedpe, no FDR, no shuffle dir.
+    per group. No .bedpe, no FDR.
 
-    Use this when you only need the pseudobulk matrices -- e.g. to feed a
-    differential-loop pipeline downstream, or to be re-merged into
-    coarser-level groups via merge_group_to_bigger_group_cools before any
-    loop calling.
+    If shuffle=True (default), additionally builds a per-diagonal shuffled
+    version of every cell's imputed matrix and aggregates those into
+      {output_dir}/shuffle/{group}/{group}.{E,E2,T,T2}.cool
+    These shuffled group cools are what a downstream permutation-FDR loop
+    caller needs. They can only be constructed from single-cell imputed
+    cools (the shuffle is per-diagonal per-cell), so building them now,
+    together with the real cools, spares you from keeping single-cell
+    imputed cools around indefinitely.
+
+    Use call_loop_pseudobulk(shuffle=False) when you'll never do FDR-based
+    loop calling on these pseudobulks -- for example, if the downstream
+    analysis is a direct A-vs-B pixel comparison.
 
     Idempotent: if {output_dir}/Success exists, returns immediately.
     """
@@ -410,36 +419,30 @@ def call_loop_pseudobulk(cell_table_path,
     cell_table.to_csv(cell_table_path, header=False, index=True)
     groups = list(cell_table['cell_group'].unique())
 
-    # Prepare step1+step2 with shuffle=False (real data). This writes
-    # snakemake_cmd_step1.txt, snakemake_cmd_step2.txt, and the top-level
-    # Snakefile whose `summary` rule normally requires .loop.bedpe.
+    prep_kwargs = dict(cell_table_path=cell_table_path,
+                       chrom_size_path=chrom_size_path,
+                       chunk_size=chunk_size,
+                       dist=dist,
+                       cap=cap,
+                       pad=pad,
+                       gap=gap,
+                       resolution=resolution,
+                       min_cutoff=min_cutoff,
+                       keep_cell_matrix=keep_cell_matrix,
+                       cpu_per_job=cpu_per_job,
+                       log_e=log_e,
+                       raw_resolution_str=raw_resolution_str)
+
+    # --- Real pseudobulk cools ---
+    # Prepare with shuffle=False (real data). The generated top-level
+    # Snakefile's `summary` rule requires .loop.bedpe (which would trigger
+    # the expensive call_loop rule), so we run step1 as usual but launch
+    # step2 with the .cool files as explicit targets, bypassing summary.
     if not os.path.exists(f'{output_dir}/finish'):
-        prepare_loop_snakemake(cell_table_path=cell_table_path,
-                               output_dir=output_dir,
-                               chrom_size_path=chrom_size_path,
-                               chunk_size=chunk_size,
-                               dist=dist,
-                               cap=cap,
-                               pad=pad,
-                               gap=gap,
-                               resolution=resolution,
-                               min_cutoff=min_cutoff,
-                               keep_cell_matrix=keep_cell_matrix,
-                               cpu_per_job=cpu_per_job,
-                               log_e=log_e,
-                               raw_resolution_str=raw_resolution_str,
-                               shuffle=False)
-
-        # Unlock in case of a prior interrupted run.
+        prepare_loop_snakemake(output_dir=output_dir, shuffle=False, **prep_kwargs)
         _unlock_snakemake(pathlib.Path(output_dir).absolute())
-
-        # Step1: per-cell per-chrom loop matrices, merged per chunk into cool.
         subprocess.run(['sh', f'{output_dir}/snakemake_cmd_step1.txt'],
                        check=True)
-
-        # Step2: merge chunks into group cools. Bypass the default `summary`
-        # target (which asks for .loop.bedpe and would trigger call_loop);
-        # target the group .cool files explicitly.
         matrix_types = ['E', 'E2', 'T', 'T2', 'Q', 'Q2']
         targets = [f'{g}/{g}.{mt}.cool' for g in groups for mt in matrix_types]
         subprocess.run(['snakemake',
@@ -449,14 +452,28 @@ def call_loop_pseudobulk(cell_table_path,
                         '--scheduler', 'greedy',
                         '--rerun-incomplete', '--'] + targets,
                        check=True)
-
-        # Manually clean up chunk dirs (the `summary` rule's rm -rf never
-        # fired because we bypassed it), then touch `finish`.
+        # The `summary` rule's rm -rf never fired because we bypassed it;
+        # clean chunk dirs manually and touch the finish sentinel.
         for chunk_dir in pathlib.Path(output_dir).glob('*_chunk*'):
             subprocess.run(f'rm -rf {chunk_dir}', shell=True, check=False)
         pathlib.Path(f'{output_dir}/finish').touch()
 
+    # --- Shuffle pseudobulk cools (optional) ---
+    # Prepared with shuffle=True: calculate-loop-matrix is invoked with
+    # --shuffle, which per-diagonally permutes each cell's imputed matrix
+    # before computing E and T. The step2 Snakefile's `summary` rule then
+    # only asks for {E,E2,T,T2}.cool (Q/Q2 are dropped when shuffle=True),
+    # so _run_snakemake can run it end-to-end without an explicit-target
+    # workaround.
+    if shuffle:
+        shuffle_dir = f'{output_dir}/shuffle'
+        pathlib.Path(shuffle_dir).mkdir(exist_ok=True, parents=True)
+        if not os.path.exists(f'{shuffle_dir}/finish'):
+            prepare_loop_snakemake(output_dir=shuffle_dir, shuffle=True, **prep_kwargs)
+            _run_snakemake(shuffle_dir)
+
     if cleanup:
+        subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
         subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
 
     with open(f'{output_dir}/Success', 'w') as f:
