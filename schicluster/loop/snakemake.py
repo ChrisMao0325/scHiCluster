@@ -505,6 +505,7 @@ def merge_loop(group,
                dist_thres=20000,
                size_thres=1,
                e_positive_only=True,
+               use_bkfilter=True,
                cleanup_totalloop_info=True,
                cleanup=True):
 
