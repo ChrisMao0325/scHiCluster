@@ -552,6 +552,12 @@ def merge_loop(group,
         else:
             _merge_kwargs['shuffle'] = True
             _merge_kwargs['output_dir'] = shuffle_dir
+            # Shuffle-side cools only exist for E/E2/T/T2 (Q/Q2 are not
+            # generated when the chunk Snakefile runs in shuffle mode).
+            # Without this override, the default matrix_types tuple would
+            # glob for *.Q.cool inside each fine dir's shuffle/ subtree and
+            # raise IndexError when the file isn't there.
+            _merge_kwargs['matrix_types'] = ('E', 'E2', 'T', 'T2')
             merge_group_to_bigger_group_cools(**_merge_kwargs)
             
         real_group_prefix = f'{real_dir}/{group}/{group}'
