@@ -4,4 +4,4 @@ merge_cell_to_group.py corresponding to loop_sumcell_chr,
 which aggregates the cell E, T to cluster level E, E2, T, T2, O,
 """
 
-from .snakemake import call_loop, call_loop_pseudobulk
+from .snakemake import call_loop, call_loop_pseudobulk, call_loops_from_pseudobulk

@@ -481,6 +481,127 @@ def call_loop_pseudobulk(cell_table_path,
     return
 
 
+def call_loops_from_pseudobulk(output_dir,
+                               group,
+                               chrom_size_path,
+                               resolution=10000,
+                               black_list_path=None,
+                               thres_bl=1.33,
+                               thres_donut=1.33,
+                               thres_h=1.2,
+                               thres_v=1.2,
+                               fdr_pad=7,
+                               fdr_min_dist=5,
+                               fdr_max_dist=500,
+                               fdr_thres=0.1,
+                               dist_thres=20000,
+                               size_thres=1,
+                               e_positive_only=True,
+                               use_bkfilter=True,
+                               cleanup=True,
+                               cleanup_totalloop_info=True):
+    """Run loop calling + shuffle-FDR on cools that already exist on disk.
+
+    Companion to call_loop_pseudobulk(): given
+        {output_dir}/{group}/{group}.{E,E2,T,T2,Q,Q2}.cool         (real)
+        {output_dir}/shuffle/{group}/{group}.{E,E2,T,T2}.cool     (shuffle)
+    already produced (e.g. by call_loop_pseudobulk with shuffle=True, or
+    by manually summing finer pseudobulks via merge_group_to_bigger_group_cools
+    twice), do only the downstream work:
+
+      1. call_loops() on real cools -> initial *.bedpe + totalloop_info.hdf
+      2. compute_t (real + shuffle) -> T scaling
+      3. permute_fdr -> empirical null from shuffle E vs real E per distance
+      4. update_fdr_qval -> corrected q-values in totalloop_info.hdf
+      5. filter_loops -> final *.bedpe with FDR-corrected significance
+      6. cleanup (*.npz, totalloop_info.hdf) + touch Success
+
+    Unlike call_loop(), this function does NOT invoke snakemake at all
+    (there is no per-cell work to do), so it will not fail when finish
+    exists but the snakemake-side intermediates are absent -- which is
+    exactly the state left by call_loop_pseudobulk().
+
+    Idempotent: skips if loop_summit.bedpe exists and totalloop_info.hdf
+    does not (i.e. FDR + cleanup already ran for this group).
+    """
+    real_group_prefix    = f'{output_dir}/{group}/{group}'
+    shuffle_group_prefix = f'{output_dir}/shuffle/{group}/{group}'
+
+    # sanity: required inputs on disk
+    required = [f'{real_group_prefix}.{m}.cool' for m in ('E', 'T', 'T2')] + \
+               [f'{shuffle_group_prefix}.{m}.cool' for m in ('E', 'T', 'T2')]
+    for p in required:
+        if not os.path.exists(p):
+            raise FileNotFoundError(
+                f'call_loops_from_pseudobulk: required cool missing: {p}. '
+                'Did call_loop_pseudobulk (with shuffle=True) run first?')
+    if black_list_path is None:
+        raise ValueError('Please provide black_list_path')
+
+    # idempotency: FDR + cleanup already done for this group?
+    if (os.path.exists(f'{real_group_prefix}.loop_summit.bedpe')
+            and not os.path.exists(f'{real_group_prefix}.totalloop_info.hdf')):
+        # ensure Success is present (may have been wiped by user)
+        with open(f'{output_dir}/Success', 'w') as f:
+            f.write('42')
+        return
+
+    # 1. initial call_loops on real cools (writes totalloop_info.hdf, bedpes)
+    call_loops(group_prefix=real_group_prefix,
+               output_prefix=real_group_prefix,
+               resolution=resolution,
+               thres_bl=thres_bl, thres_donut=thres_donut,
+               thres_h=thres_h,   thres_v=thres_v,
+               fdr_thres=fdr_thres,
+               dist_thres=dist_thres, size_thres=size_thres,
+               e_positive_only=e_positive_only,
+               use_bkfilter=use_bkfilter)
+
+    # 2-3. T scaling and permutation FDR from shuffle side
+    tot = compute_t(real_group_prefix)
+    _   = compute_t(shuffle_group_prefix, tot)
+    permute_fdr(chrom_size_path=chrom_size_path,
+                black_list_path=black_list_path,
+                shuffle_group_prefix=shuffle_group_prefix,
+                real_group_prefix=real_group_prefix,
+                res=resolution,
+                pad=fdr_pad,
+                min_dist=fdr_min_dist,
+                max_dist=fdr_max_dist)
+
+    # 4. corrected q-values (rewrites totalloop_info.hdf)
+    total_loops = update_fdr_qval(chrom_size_path,
+                                  real_group_prefix,
+                                  shuffle_group_prefix,
+                                  res=resolution,
+                                  min_dist=fdr_min_dist,
+                                  max_dist=fdr_max_dist)
+
+    # 5. rewrite bedpes with FDR-corrected q-values
+    filter_loops(total_loops,
+                 output_prefix=real_group_prefix,
+                 fdr_thres=fdr_thres,
+                 resolution=resolution,
+                 dist_thres=dist_thres,
+                 size_thres=size_thres,
+                 use_bkfilter=use_bkfilter)
+
+    # 6. cleanup
+    if cleanup:
+        subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
+        subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
+    if cleanup_totalloop_info:
+        real_total    = f'{real_group_prefix}.totalloop_info.hdf'
+        shuffle_total = f'{shuffle_group_prefix}.totalloop_info.hdf'
+        for p in (real_total, shuffle_total):
+            if os.path.exists(p):
+                os.remove(p)
+
+    with open(f'{output_dir}/Success', 'w') as f:
+        f.write('42')
+    return
+
+
 def merge_loop(group,
                output_dir,
                chrom_size_path,
