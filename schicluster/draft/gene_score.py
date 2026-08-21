@@ -35,7 +35,10 @@ def gene_score_impute(cell_path, chrom_sizes, gene_meta):
 
 def gene_score(cell_table_path, gene_meta_path, resolution, output_hdf_path, chrom_size_path, 
                slop=0, cpu=10, mode='impute', chrom1=1, pos1=2, chrom2=5, pos2=6):
-    chrom_sizes = pd.read_csv(chrom_size_path, sep='\t', header=None, index_col=0)
+    # squeeze to a Series: raw mode does arithmetic on chrom_sizes.loc[chrom],
+    # which on a DataFrame yields a Series and breaks csr_matrix's shape.
+    chrom_sizes = pd.read_csv(chrom_size_path, sep='\t', header=None,
+                              index_col=0).squeeze('columns')
     gene_meta = pd.read_csv(gene_meta_path, sep='\t', header=None, index_col=3)
     gene_meta = gene_meta[gene_meta[0].isin(chrom_sizes.index)]
     gene_meta[1] = (gene_meta[1] - slop) // resolution
