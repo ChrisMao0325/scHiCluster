@@ -14,7 +14,7 @@ def gene_score_raw(cell_path, chrom_sizes, gene_meta, resolution, chrom1, pos1, 
         if chrfilter.sum()==0:
             D = csr_matrix((n_bins, n_bins))
         else:
-            D = data.loc[data[chrom1]==chrfilter]
+            D = data.loc[chrfilter].copy()
             D[[pos1, pos2]] = (D[[pos1, pos2]] - 1) // resolution
             D = D.groupby(by=[pos1, pos2])[chrom1].count().reset_index()
             D = csr_matrix((D[chrom1].astype(np.int32), (D[pos1], D[pos2])), (n_bins, n_bins))
