@@ -208,6 +208,74 @@ def _run_snakemake(output_dir):
     subprocess.run(['sh', step2], check=True)
 
 
+def _fdr_done_path(real_group_prefix):
+    return f'{real_group_prefix}.fdr_done'
+
+
+def _shuffle_fdr_group(real_group_prefix,
+                       shuffle_group_prefix,
+                       chrom_size_path,
+                       black_list_path,
+                       resolution=10000,
+                       fdr_pad=7,
+                       fdr_min_dist=5,
+                       fdr_max_dist=500,
+                       fdr_thres=0.1,
+                       dist_thres=20000,
+                       size_thres=1,
+                       e_positive_only=True,
+                       use_bkfilter=True):
+    """Permutation FDR for one group, then rewrite its loop files.
+
+    Writes {real_group_prefix}.fdr_done when it finishes, and returns at once if
+    that marker already exists. The marker is the only "done" signal: the absence
+    of totalloop_info.hdf is not, because snakemake's shadow directory, a cleanup
+    step or a requeue can all remove that file before the FDR has run. If the
+    table is missing and the marker is absent, the table is rebuilt from the
+    group's cools with call_loops() before the FDR.
+    """
+    marker = _fdr_done_path(real_group_prefix)
+    if os.path.exists(marker):
+        return False
+    if not os.path.exists(f'{real_group_prefix}.totalloop_info.hdf'):
+        call_loops(group_prefix=real_group_prefix,
+                   output_prefix=real_group_prefix,
+                   resolution=resolution,
+                   fdr_thres=fdr_thres,
+                   dist_thres=dist_thres,
+                   size_thres=size_thres,
+                   e_positive_only=e_positive_only,
+                   use_bkfilter=use_bkfilter)
+
+    tot = compute_t(real_group_prefix)
+    _ = compute_t(shuffle_group_prefix, tot)
+    permute_fdr(chrom_size_path=chrom_size_path,
+                black_list_path=black_list_path,
+                shuffle_group_prefix=shuffle_group_prefix,
+                real_group_prefix=real_group_prefix,
+                res=resolution,
+                pad=fdr_pad,
+                min_dist=fdr_min_dist,
+                max_dist=fdr_max_dist)
+    total_loops = update_fdr_qval(chrom_size_path,
+                                  real_group_prefix,
+                                  shuffle_group_prefix,
+                                  res=resolution,
+                                  min_dist=fdr_min_dist,
+                                  max_dist=fdr_max_dist)
+    # redo filter loops because FDR changed
+    filter_loops(total_loops,
+                 output_prefix=real_group_prefix,
+                 fdr_thres=fdr_thres,
+                 resolution=resolution,
+                 dist_thres=dist_thres,
+                 size_thres=size_thres,
+                 use_bkfilter=use_bkfilter)
+    with open(marker, 'w') as f:
+        f.write('42')
+    return True
+
+
 def call_loop(cell_table_path,
               output_dir,
               chrom_size_path,
@@ -240,12 +308,6 @@ def call_loop(cell_table_path,
 
     pathlib.Path(output_dir).mkdir(exist_ok=True)
 
-    # Whole-pipeline idempotency: if a previous run already wrote Success,
-    # there is nothing to do. Without this guard, a requeue would re-enter
-    # the FDR step and crash on an already-cleaned-up totalloop_info.hdf.
-    if os.path.exists(f'{output_dir}/Success'):
-        return
-
     # deal with cell table path, if the path has two col, add one group cal internally
     _cell_table_path = str(cell_table_path)
     sep = '\t' if _cell_table_path.endswith('tsv') else ','
@@ -261,9 +323,19 @@ def call_loop(cell_table_path,
                          f'two columns (cell_id, cell_url) or '
                          f'three columns (cell_id, cell_url, cell_group), '
                          f'got {cell_table.shape[1]} columns.')
+    groups = cell_table['cell_group'].unique()
+
+    # Whole-pipeline idempotency: nothing to do if a previous run wrote Success
+    # and, with shuffle, every group has its FDR marker. A Success without the
+    # markers (runs affected by the skipped-FDR bug, or made before the markers
+    # existed) falls through, and the FDR is redone below.
+    if os.path.exists(f'{output_dir}/Success') and (
+            not shuffle or all(os.path.exists(_fdr_done_path(f'{output_dir}/{g}/{g}'))
+                               for g in groups)):
+        return
+
     cell_table_path = f'{output_dir}/cell_table.csv'
     cell_table.to_csv(cell_table_path, header=False, index=True)
-    groups = cell_table['cell_group'].unique()
 
     kwargs = locals()
     shuffle = kwargs.pop('shuffle')
@@ -295,50 +367,21 @@ def call_loop(cell_table_path,
     # final call loop if shuffle
     if shuffle:
         for group in groups:
-            real_group_prefix = f'{real_dir}/{group}/{group}'
-            shuffle_group_prefix = f'{shuffle_dir}/{group}/{group}'
-
-            # Per-group idempotency: FDR + cleanup leaves loop_summit.bedpe
-            # in place and removes totalloop_info.hdf. That combination can
-            # only occur if the full sequence -- update_fdr_qval,
-            # filter_loops, cleanup_totalloop_info -- already ran for this
-            # group. Re-running update_fdr_qval here would crash with
-            # FileNotFoundError on the deleted hdf.
-            # Note: loop_summit.bedpe alone is not enough (it's also written
-            # by the initial call_loops() during snakemake step2, before
-            # FDR runs); the missing totalloop_info.hdf is what proves the
-            # post-FDR cleanup ran.
-            if (os.path.exists(f'{real_group_prefix}.loop_summit.bedpe')
-                    and not os.path.exists(f'{real_group_prefix}.totalloop_info.hdf')):
-                continue
-
-            tot = compute_t(real_group_prefix)
-            _ = compute_t(shuffle_group_prefix, tot)
-
-            permute_fdr(chrom_size_path=chrom_size_path,
-                        black_list_path=black_list_path,
-                        shuffle_group_prefix=shuffle_group_prefix,
-                        real_group_prefix=real_group_prefix,
-                        res=resolution,
-                        pad=fdr_pad,
-                        min_dist=fdr_min_dist,
-                        max_dist=fdr_max_dist)
-
-            total_loops = update_fdr_qval(chrom_size_path,
-                                          real_group_prefix,
-                                          shuffle_group_prefix,
-                                          res=resolution,
-                                          min_dist=fdr_min_dist,
-                                          max_dist=fdr_max_dist)
-
-            # redo filter loops because FDR changed
-            filter_loops(total_loops,
-                         output_prefix=real_group_prefix,
-                         fdr_thres=fdr_thres,
-                         resolution=resolution,
-                         dist_thres=dist_thres,
-                         size_thres=size_thres,
-                         use_bkfilter=use_bkfilter)
+            # skips groups whose .fdr_done marker exists; rebuilds a missing
+            # totalloop_info.hdf before the FDR
+            _shuffle_fdr_group(real_group_prefix=f'{real_dir}/{group}/{group}',
+                               shuffle_group_prefix=f'{shuffle_dir}/{group}/{group}',
+                               chrom_size_path=chrom_size_path,
+                               black_list_path=black_list_path,
+                               resolution=resolution,
+                               fdr_pad=fdr_pad,
+                               fdr_min_dist=fdr_min_dist,
+                               fdr_max_dist=fdr_max_dist,
+                               fdr_thres=fdr_thres,
+                               dist_thres=dist_thres,
+                               size_thres=size_thres,
+                               e_positive_only=e_positive_only,
+                               use_bkfilter=use_bkfilter)
 
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
@@ -521,8 +564,8 @@ def call_loops_from_pseudobulk(output_dir,
     exists but the snakemake-side intermediates are absent -- which is
     exactly the state left by call_loop_pseudobulk().
 
-    Idempotent: skips if loop_summit.bedpe exists and totalloop_info.hdf
-    does not (i.e. FDR + cleanup already ran for this group).
+    Idempotent: skips if {group}.fdr_done exists (written once the FDR
+    finished for this group).
     """
     real_group_prefix    = f'{output_dir}/{group}/{group}'
     shuffle_group_prefix = f'{output_dir}/shuffle/{group}/{group}'
@@ -538,9 +581,8 @@ def call_loops_from_pseudobulk(output_dir,
     if black_list_path is None:
         raise ValueError('Please provide black_list_path')
 
-    # idempotency: FDR + cleanup already done for this group?
-    if (os.path.exists(f'{real_group_prefix}.loop_summit.bedpe')
-            and not os.path.exists(f'{real_group_prefix}.totalloop_info.hdf')):
+    # idempotency: the .fdr_done marker is written only after the FDR finished
+    if os.path.exists(_fdr_done_path(real_group_prefix)):
         # ensure Success is present (may have been wiped by user)
         with open(f'{output_dir}/Success', 'w') as f:
             f.write('42')
@@ -557,34 +599,21 @@ def call_loops_from_pseudobulk(output_dir,
                e_positive_only=e_positive_only,
                use_bkfilter=use_bkfilter)
 
-    # 2-3. T scaling and permutation FDR from shuffle side
-    tot = compute_t(real_group_prefix)
-    _   = compute_t(shuffle_group_prefix, tot)
-    permute_fdr(chrom_size_path=chrom_size_path,
-                black_list_path=black_list_path,
-                shuffle_group_prefix=shuffle_group_prefix,
-                real_group_prefix=real_group_prefix,
-                res=resolution,
-                pad=fdr_pad,
-                min_dist=fdr_min_dist,
-                max_dist=fdr_max_dist)
-
-    # 4. corrected q-values (rewrites totalloop_info.hdf)
-    total_loops = update_fdr_qval(chrom_size_path,
-                                  real_group_prefix,
-                                  shuffle_group_prefix,
-                                  res=resolution,
-                                  min_dist=fdr_min_dist,
-                                  max_dist=fdr_max_dist)
-
-    # 5. rewrite bedpes with FDR-corrected q-values
-    filter_loops(total_loops,
-                 output_prefix=real_group_prefix,
-                 fdr_thres=fdr_thres,
-                 resolution=resolution,
-                 dist_thres=dist_thres,
-                 size_thres=size_thres,
-                 use_bkfilter=use_bkfilter)
+    # 2-5. T scaling, permutation FDR from the shuffle side, corrected q-values,
+    # rewritten bedpes, then the .fdr_done marker
+    _shuffle_fdr_group(real_group_prefix=real_group_prefix,
+                       shuffle_group_prefix=shuffle_group_prefix,
+                       chrom_size_path=chrom_size_path,
+                       black_list_path=black_list_path,
+                       resolution=resolution,
+                       fdr_pad=fdr_pad,
+                       fdr_min_dist=fdr_min_dist,
+                       fdr_max_dist=fdr_max_dist,
+                       fdr_thres=fdr_thres,
+                       dist_thres=dist_thres,
+                       size_thres=size_thres,
+                       e_positive_only=e_positive_only,
+                       use_bkfilter=use_bkfilter)
 
     # 6. cleanup
     if cleanup:
@@ -640,6 +669,33 @@ def merge_loop(group,
         pathlib.Path(f'{output_dir}/shuffle/{group}').mkdir(exist_ok=True, parents=True)
         for xx in pathlib.Path(f'{group_list[0]}/shuffle/{tmp}').iterdir():
             subprocess.run(f'rsync -arv {group_list[0]}/shuffle/{tmp}/{xx.name} {output_dir}/shuffle/{group}/{xx.name.replace(tmp, group)}', shell=True)
+        # The copied loop files are only as good as the source group's: run the
+        # FDR here unless the source carried an .fdr_done marker (copied along
+        # under the new name).
+        if shuffle:
+            if black_list_path is None:
+                raise ValueError('Please provide black_list_path when shuffle=True')
+            _shuffle_fdr_group(real_group_prefix=f'{output_dir}/{group}/{group}',
+                               shuffle_group_prefix=f'{output_dir}/shuffle/{group}/{group}',
+                               chrom_size_path=chrom_size_path,
+                               black_list_path=black_list_path,
+                               resolution=resolution,
+                               fdr_pad=fdr_pad,
+                               fdr_min_dist=fdr_min_dist,
+                               fdr_max_dist=fdr_max_dist,
+                               fdr_thres=fdr_thres,
+                               dist_thres=dist_thres,
+                               size_thres=size_thres,
+                               e_positive_only=e_positive_only,
+                               use_bkfilter=use_bkfilter)
+            if cleanup:
+                subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)
+                subprocess.run(f'rm -rf {output_dir}/shuffle/*/*.npz', shell=True)
+            if cleanup_totalloop_info:
+                for p in (f'{output_dir}/{group}/{group}.totalloop_info.hdf',
+                          f'{output_dir}/shuffle/{group}/{group}.totalloop_info.hdf'):
+                    if os.path.exists(p):
+                        os.remove(p)
         with open(f'{output_dir}/Success', 'w') as f:
             f.write('42')
         return
@@ -682,35 +738,23 @@ def merge_loop(group,
             merge_group_to_bigger_group_cools(**_merge_kwargs)
             
         real_group_prefix = f'{real_dir}/{group}/{group}'
-        shuffle_group_prefix = f'{shuffle_dir}/{group}/{group}'
-
-        tot = compute_t(real_group_prefix)
-        _ = compute_t(shuffle_group_prefix, tot)
-
-        permute_fdr(chrom_size_path=chrom_size_path,
-                    black_list_path=black_list_path,
-                    shuffle_group_prefix=shuffle_group_prefix,
-                    real_group_prefix=real_group_prefix,
-                    res=resolution,
-                    pad=fdr_pad,
-                    min_dist=fdr_min_dist,
-                    max_dist=fdr_max_dist)
-
-        total_loops = update_fdr_qval(chrom_size_path,
-                                      real_group_prefix,
-                                      shuffle_group_prefix,
-                                      res=resolution,
-                                      min_dist=fdr_min_dist,
-                                      max_dist=fdr_max_dist)
-
-        # redo filter loops because FDR changed
-        filter_loops(total_loops,
-                     output_prefix=real_group_prefix,
-                     fdr_thres=fdr_thres,
-                     resolution=resolution,
-                     dist_thres=dist_thres,
-                     size_thres=size_thres,
-                     use_bkfilter=use_bkfilter)
+        # call_loops() above has just rewritten the first-pass loop files, so a
+        # marker left by an earlier run no longer applies
+        if os.path.exists(_fdr_done_path(real_group_prefix)):
+            os.remove(_fdr_done_path(real_group_prefix))
+        _shuffle_fdr_group(real_group_prefix=real_group_prefix,
+                           shuffle_group_prefix=f'{shuffle_dir}/{group}/{group}',
+                           chrom_size_path=chrom_size_path,
+                           black_list_path=black_list_path,
+                           resolution=resolution,
+                           fdr_pad=fdr_pad,
+                           fdr_min_dist=fdr_min_dist,
+                           fdr_max_dist=fdr_max_dist,
+                           fdr_thres=fdr_thres,
+                           dist_thres=dist_thres,
+                           size_thres=size_thres,
+                           e_positive_only=e_positive_only,
+                           use_bkfilter=use_bkfilter)
 
     if cleanup:
         subprocess.run(f'rm -rf {output_dir}/*/*.npz', shell=True)

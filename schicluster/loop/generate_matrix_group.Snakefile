@@ -105,6 +105,9 @@ if not shuffle:
             '{group}/{group}.globalloop.bedpe',
             '{group}/{group}.bkloop.bedpe',
             '{group}/{group}.loop_summit.bedpe',
+            # declared so that shadow: "minimal" keeps it; the shuffle-FDR step in
+            # call_loop() reads it after snakemake finishes
+            '{group}/{group}.totalloop_info.hdf',
         params:
             prefix='{group}/{group}'
         shadow: "minimal"
